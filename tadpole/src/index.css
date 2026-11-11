@@ -1,0 +1,12 @@
+body {
+  min-width: 320px;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::selection {
+  background: #00ff66;
+  color: #080808;
+}
