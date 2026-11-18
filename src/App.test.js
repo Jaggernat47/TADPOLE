@@ -56,6 +56,7 @@ test('renders the PixelPlay storefront and game library', () => {
   expect(screen.queryByRole('heading', { name: 'My Games' })).not.toBeInTheDocument();
   expect(screen.getByRole('link', { name: 'Wishlist' })).toHaveAttribute('href', '?wishlist');
   expect(screen.getByRole('link', { name: 'Shopping cart' })).toHaveAttribute('href', '?cart');
+  expect(screen.getByRole('link', { name: 'Notifications' })).toHaveAttribute('href', '?notifications');
   const mainNavigation = screen.getByRole('navigation', { name: 'Main navigation' });
   expect(within(mainNavigation).getAllByRole('link').map((link) => link.textContent)).toEqual([
     'Games',
@@ -122,7 +123,7 @@ test('lists careers and saves a role-specific application in this browser', () =
   fireEvent.click(screen.getByRole('button', { name: 'Save Application' }));
 
   expect(screen.getByRole('status')).toHaveTextContent(
-    'Application for Game Developer saved in this browser. It has not been sent to an employer.',
+    'Your application for Game Developer was submitted successfully!',
   );
   expect(JSON.parse(window.localStorage.getItem('tadpole-job-applications'))[0]).toMatchObject({
     roleId: 'game-developer',
@@ -130,7 +131,100 @@ test('lists careers and saves a role-specific application in this browser', () =
     name: 'Pixel Player',
     email: 'player@example.com',
     coverNote: 'I build fun games.',
+    status: 'pending',
   });
+  expect(JSON.parse(window.localStorage.getItem('tadpole-application-tracks'))).toHaveLength(1);
+  navigateTo('?notifications');
+  expect(screen.getByRole('heading', { name: 'Your inbox is empty' })).toBeInTheDocument();
+});
+
+test('hiring notifications provide a one-time invitation that must be verified before staff signup', async () => {
+  window.history.replaceState({}, '', '/?careers&role=game-developer');
+  render(<App />);
+  fireEvent.change(screen.getByLabelText('YOUR NAME'), { target: { value: 'Pixel Player' } });
+  fireEvent.change(screen.getByLabelText('EMAIL ADDRESS'), { target: { value: 'player@example.com' } });
+  fireEvent.change(screen.getByLabelText('INTRODUCTION'), { target: { value: 'I build fun games.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save Application' }));
+
+  navigateTo('?admin');
+  fireEvent.change(screen.getByLabelText('ADMIN NAME'), { target: { value: 'Studio Admin' } });
+  fireEvent.change(screen.getByLabelText('ADMIN USERNAME'), { target: { value: 'studioadmin' } });
+  fireEvent.change(screen.getByLabelText('PASSWORD'), { target: { value: 'secure-demo-pass' } });
+  fireEvent.change(screen.getByLabelText('CONFIRM PASSWORD'), { target: { value: 'secure-demo-pass' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Create Admin Account' }));
+  expect(await screen.findByText('STAFF CONSOLE')).toBeInTheDocument();
+  const applicationsButton = screen.getAllByRole('button', { name: /Job Applications/ }).find((button) => button.querySelector('.admin-nav-count'));
+  fireEvent.click(applicationsButton);
+  expect(applicationsButton.querySelector('.admin-nav-count')).toHaveTextContent('1');
+  fireEvent.click(screen.getByRole('button', { name: 'Accept & Send Hiring Notification' }));
+
+  navigateTo('?notifications');
+  fireEvent.click(await screen.findByText('You got the job: Game Developer'));
+  expect(screen.getByText(/Every great adventure needs a great teammate/)).toBeInTheDocument();
+  const code = JSON.parse(window.localStorage.getItem('tadpole-staff-invitations'))[0].code;
+  expect(screen.getByText(code)).toBeInTheDocument();
+  const invitationLink = screen.getByRole('link', { name: 'Create Your Staff Account' });
+  expect(invitationLink).toHaveAttribute('href', '?admin&join');
+  navigateTo('?admin&join');
+  expect(await screen.findByRole('heading', { name: 'Enter your invitation key' })).toBeInTheDocument();
+  expect(screen.queryByLabelText('WORKER USERNAME')).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('STAFF INVITATION KEY'), { target: { value: code } });
+  fireEvent.click(screen.getByRole('button', { name: 'Verify Code' }));
+  expect(await screen.findByRole('heading', { name: 'Create your worker account' })).toBeInTheDocument();
+  expect(screen.getByLabelText('WORKER USERNAME')).toHaveValue('');
+  fireEvent.change(screen.getByLabelText('WORKER USERNAME'), { target: { value: 'pixelplayer' } });
+  fireEvent.change(screen.getByLabelText('PASSWORD'), { target: { value: 'worker-demo-pass' } });
+  fireEvent.change(screen.getByLabelText('CONFIRM PASSWORD'), { target: { value: 'worker-demo-pass' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Create Staff Account' }));
+  expect(await screen.findByText('Pixel Player / worker')).toBeInTheDocument();
+  expect(JSON.parse(window.localStorage.getItem('tadpole-staff-invitations'))[0].usedBy).toBe('pixelplayer');
+});
+
+test('admin panel sections show activity and publish games to the storefront', async () => {
+  window.history.replaceState({}, '', '/?admin');
+  render(<App />);
+  fireEvent.change(screen.getByLabelText('ADMIN NAME'), { target: { value: 'Studio Admin' } });
+  fireEvent.change(screen.getByLabelText('ADMIN USERNAME'), { target: { value: 'studioadmin' } });
+  fireEvent.change(screen.getByLabelText('PASSWORD'), { target: { value: 'secure-demo-pass' } });
+  fireEvent.change(screen.getByLabelText('CONFIRM PASSWORD'), { target: { value: 'secure-demo-pass' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Create Admin Account' }));
+  expect(await screen.findByText('STAFF CONSOLE')).toBeInTheDocument();
+
+  const gamesButton = screen.getAllByRole('button', { name: /Games & Uploads/ }).find((button) => button.querySelector('.admin-nav-count'));
+  fireEvent.click(gamesButton);
+  fireEvent.change(screen.getByLabelText('GAME TITLE'), { target: { value: 'Moonlit Marsh' } });
+  fireEvent.change(screen.getByLabelText('PRICE (USD)'), { target: { value: '12' } });
+  fireEvent.change(screen.getByLabelText('RELEASE YEAR'), { target: { value: '2026' } });
+  fireEvent.change(screen.getByLabelText('DESCRIPTION'), { target: { value: 'A new pixel adventure.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Publish Game' }));
+  expect(screen.getByRole('status')).toHaveTextContent('Moonlit Marsh is published in the storefront.');
+  expect(JSON.parse(window.localStorage.getItem('tadpole-uploaded-games'))[0]).toMatchObject({ title: 'Moonlit Marsh', status: 'published' });
+  navigateTo('');
+  expect(await screen.findByRole('heading', { name: 'Moonlit Marsh' })).toBeInTheDocument();
+});
+
+test('player support reports appear in admin triage and can be resolved', async () => {
+  window.history.replaceState({}, '', '/?support');
+  render(<App />);
+  fireEvent.change(screen.getByLabelText('YOUR NAME'), { target: { value: 'Concerned Player' } });
+  fireEvent.change(screen.getByLabelText('EMAIL ADDRESS'), { target: { value: 'player@example.com' } });
+  fireEvent.change(screen.getByLabelText('WHAT IS THIS ABOUT?'), { target: { value: 'Account access' } });
+  fireEvent.change(screen.getByLabelText('DETAILS'), { target: { value: 'I need help signing in.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send Report' }));
+  expect(screen.getByRole('status')).toHaveTextContent('Your report has been saved for the Tadpole team');
+
+  navigateTo('?admin');
+  fireEvent.change(screen.getByLabelText('ADMIN NAME'), { target: { value: 'Studio Admin' } });
+  fireEvent.change(screen.getByLabelText('ADMIN USERNAME'), { target: { value: 'studioadmin' } });
+  fireEvent.change(screen.getByLabelText('PASSWORD'), { target: { value: 'secure-demo-pass' } });
+  fireEvent.change(screen.getByLabelText('CONFIRM PASSWORD'), { target: { value: 'secure-demo-pass' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Create Admin Account' }));
+  await screen.findByText('STAFF CONSOLE');
+  const reportsButton = screen.getAllByRole('button', { name: /Player Reports/ }).find((button) => button.querySelector('.admin-nav-count'));
+  fireEvent.click(reportsButton);
+  expect(screen.getByText(/I need help signing in\./)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Resolve' }));
+  expect(JSON.parse(window.localStorage.getItem('tadpole-player-reports'))[0].status).toBe('resolved');
 });
 
 test('filters games by category', () => {
@@ -199,6 +293,24 @@ test('adds purchased games to My Games after checkout', () => {
   window.history.replaceState({}, '', '/?profile');
   render(<App />);
   expect(within(document.querySelector('.profile-page')).getByRole('heading', { name: 'Towers VS Zombies' })).toBeInTheDocument();
+});
+
+test('shows purchased hardware in the player profile collection', () => {
+  saveTestAccount();
+  render(<App />);
+  const controller = screen.getByRole('heading', { name: 'Controller' }).closest('article');
+  fireEvent.click(within(controller).getByRole('button', { name: 'Add to Cart' }));
+  cartPage();
+  fireEvent.click(screen.getByRole('radio', { name: 'PayPal' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Proceed to Checkout' }));
+  expect(screen.getByText(/Demo order complete with PayPal/)).toBeInTheDocument();
+
+  navigateTo('?profile');
+  const hardwareSection = document.querySelector('.my-hardware');
+  expect(within(hardwareSection).getByRole('heading', { name: 'My Hardware' })).toBeInTheDocument();
+  expect(within(hardwareSection).getByRole('heading', { name: 'Controller' })).toBeInTheDocument();
+  expect(within(hardwareSection).getByText('1 owned')).toBeInTheDocument();
+  expect(within(hardwareSection).queryByRole('heading', { name: 'Gaming Console' })).not.toBeInTheDocument();
 });
 
 test('wishlist saves games and hardware and moves items into the cart', () => {

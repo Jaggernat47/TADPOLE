@@ -164,6 +164,13 @@ const hardwareReviewsStorageKey = 'tadpole-hardware-reviews';
 const accountsStorageKey = 'tadpole-demo-accounts';
 const activeUserStorageKey = 'tadpole-active-user';
 const jobApplicationsStorageKey = 'tadpole-job-applications';
+const applicationTracksStorageKey = 'tadpole-application-tracks';
+const staffInvitationsStorageKey = 'tadpole-staff-invitations';
+const staffAccountsStorageKey = 'tadpole-staff-accounts';
+const activeStaffStorageKey = 'tadpole-active-staff';
+const catalogStorageKey = 'tadpole-uploaded-games';
+const ordersStorageKey = 'tadpole-demo-orders';
+const reportsStorageKey = 'tadpole-player-reports';
 const passwordIterations = 120000;
 
 // Profile and badge defaults are reused when accounts are created or older data is loaded.
@@ -203,6 +210,110 @@ function readStoredList(key, validate) {
   }
 }
 
+function validCatalogGame(game) {
+  return Boolean(
+    game &&
+    typeof game.id === 'string' &&
+    game.id.startsWith('uploaded-') &&
+    typeof game.title === 'string' &&
+    typeof game.category === 'string' &&
+    Number.isInteger(Number(game.year)) &&
+    Number.isFinite(Number(game.price)) &&
+    Number(game.price) >= 0 &&
+    typeof game.description === 'string' &&
+    ['published', 'hidden'].includes(game.status),
+  );
+}
+
+function getCatalogGames(includeHidden = false) {
+  const uploaded = readStoredList(catalogStorageKey, validCatalogGame).value;
+  return [...games, ...uploaded.filter((game) => includeHidden || game.status === 'published')];
+}
+
+function createAccessCode(prefix) {
+  const bytes = window.crypto.getRandomValues(new Uint8Array(8));
+  const code = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
+  return `${prefix}-${code.match(/.{1,4}/g).join('-')}`;
+}
+
+function validApplicationTrack(track) {
+  return Boolean(track && typeof track.applicationId === 'string');
+}
+
+function validStaffInvitation(invitation) {
+  return Boolean(
+    invitation &&
+    typeof invitation.id === 'string' &&
+    typeof invitation.applicationId === 'string' &&
+    typeof invitation.code === 'string' &&
+    typeof invitation.createdAt === 'string',
+  );
+}
+
+function validOrder(order) {
+  return Boolean(
+    order &&
+    typeof order.id === 'string' &&
+    typeof order.username === 'string' &&
+    Array.isArray(order.items) &&
+    order.items.every((item) => item && typeof item.name === 'string' && Number.isFinite(Number(item.price)) && Number.isInteger(Number(item.quantity))) &&
+    Number.isFinite(Number(order.total)) &&
+    typeof order.paymentMethod === 'string' &&
+    typeof order.createdAt === 'string' &&
+    order.status === 'completed',
+  );
+}
+
+function validPlayerReport(report) {
+  return Boolean(
+    report &&
+    typeof report.id === 'string' &&
+    typeof report.name === 'string' &&
+    typeof report.email === 'string' &&
+    typeof report.category === 'string' &&
+    typeof report.details === 'string' &&
+    typeof report.submittedAt === 'string' &&
+    ['open', 'in_review', 'resolved'].includes(report.status),
+  );
+}
+
+function getUserNotifications(user) {
+  const notifications = [];
+  const orders = readStoredList(ordersStorageKey, validOrder);
+  if (user) {
+    orders.value
+      .filter((order) => getAccountKey(order.username) === getAccountKey(user.username))
+      .forEach((order) => notifications.push({
+        id: `order-${order.id}`,
+        kind: 'order',
+        title: `Order #${order.id.slice(-8)} confirmed`,
+        date: order.createdAt,
+        message: `Your demo order for ${order.items.map((item) => `${item.name} × ${item.quantity}`).join(', ')} is complete. Total: $${Number(order.total).toFixed(2)} via ${order.paymentMethod}. No payment was processed.`,
+      }));
+  }
+  const tracks = readStoredList(applicationTracksStorageKey, validApplicationTrack);
+  const applications = readStoredList(jobApplicationsStorageKey, validJobApplication);
+  const invitations = readStoredList(staffInvitationsStorageKey, validStaffInvitation);
+  tracks.value.forEach((track) => {
+    const application = applications.value.find((item) => item.id === track.applicationId);
+    if (!application || !['accepted', 'rejected'].includes(application.status)) return;
+    notifications.push({
+      id: `application-${application.id}-${application.status}`,
+      kind: 'application',
+      title: application.status === 'accepted'
+        ? `You got the job: ${application.roleTitle}`
+        : `Application update: ${application.roleTitle}`,
+      date: application.reviewedAt || application.submittedAt,
+      application,
+      invitation: invitations.value.find((item) => item.applicationId === application.id),
+      message: application.status === 'accepted'
+        ? `Congratulations, ${application.name}! The Tadpole team was impressed by your creativity, care, and can-do spirit. You’re officially joining us as our ${application.roleTitle}. Every great adventure needs a great teammate, and we’re thrilled you’re on our side. Welcome to Tadpole!`
+        : `Thank you for applying for ${application.roleTitle}. We appreciate the time and thought you put into your application. We’re unable to offer you this role right now, but we hope you’ll consider applying again.`,
+    });
+  });
+  return notifications.sort((left, right) => (Date.parse(right.date) || 0) - (Date.parse(left.date) || 0));
+}
+
 // Checks that a cart item has the fields and values checkout expects.
 function validCartItem(item) {
   return (
@@ -240,7 +351,7 @@ function getGameProduct(game) {
 
 // Refreshes saved game details so renamed or updated catalog items show current information.
 function refreshSavedProduct(product) {
-  const game = games.find((item) => item.id === product.gameId);
+  const game = getCatalogGames(true).find((item) => item.id === product.gameId);
   return game ? { ...product, ...getGameProduct(game) } : product;
 }
 
@@ -251,12 +362,23 @@ function getHardwareProduct(product) {
 
 // Verifies that an account's owned-game ID still exists in the catalog.
 function validOwnedGame(id) {
-  return typeof id === 'string' && games.some((game) => game.id === id);
+  return typeof id === 'string' && getCatalogGames(true).some((game) => game.id === id);
 }
 
 // Verifies that an account's badge ID still exists in the badge list.
 function validBadge(id) {
-  return typeof id === 'string' && demoBadges.some((badge) => badge.id === id);
+  return typeof id === 'string' && getCatalogGames(true).some((game) => `demo-${game.id}` === id);
+}
+
+function getDemoBadge(game) {
+  return demoBadges.find((badge) => badge.gameId === game.id) || {
+    id: `demo-${game.id}`,
+    gameId: game.id,
+    gameTitle: game.title,
+    title: `${game.title} Starter`,
+    description: 'Started the game demo.',
+    icon: game.symbol || '🎮',
+  };
 }
 
 // Normalizes usernames so sign-in lookup is case-insensitive.
@@ -358,7 +480,7 @@ function equalHashes(left, right) {
 // Finds the game selected by the URL, falling back to the first catalog entry.
 function getSelectedGame() {
   const gameId = new URLSearchParams(window.location.search).get('game');
-  return games.find((game) => game.id === gameId) || games[0];
+  return getCatalogGames(true).find((game) => game.id === gameId) || games[0];
 }
 
 // Renders the game's artwork, using the supplied logo for Towers VS Zombies.
@@ -504,8 +626,15 @@ function HardwareArtwork({ product, className = '' }) {
 
 // Shared header controls for wishlist, cart, and the signed-in player's profile.
 function ShopShortcuts({ cartCount, wishlistCount, user }) {
+  const notificationCount = getUserNotifications(user).length;
   return (
     <div className="shop-shortcuts">
+      <a className="shortcut-link" href="?notifications" aria-label={`Notifications${notificationCount ? `, ${notificationCount} unread` : ''}`} title="Notifications">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+        </svg>
+        {notificationCount > 0 && <span className="shortcut-count">{notificationCount}</span>}
+      </a>
       <a className="shortcut-link" href="?wishlist" aria-label={`Wishlist${wishlistCount ? `, ${wishlistCount} items` : ''}`} title="Wishlist">
         <svg className="pixel-heart" viewBox="0 0 16 16" aria-hidden="true">
           <path d="M3 2h3v2h4V2h3v2h2v5h-2v2h-2v2H9v2H7v-2H5v-2H3V9H1V4h2z" />
@@ -543,7 +672,7 @@ function Header({ cartCount, wishlistCount, user }) {
         <a href="#games">Games</a>
         <a href="#hardware">Hardware</a>
         <a href="#about">About</a>
-        <a href="#support">Support</a>
+        <a href="?support">Support</a>
       </nav>
       <div className="header-right">
         <div className="top-actions">
@@ -752,21 +881,42 @@ function CartPage({ cart, updateCart, user, onUserChange, onSignIn, wishlistCoun
     }
 
     const purchasedGameIds = cart
-      .map((item) => item.gameId || games.find((game) => game.title === item.name)?.id)
+      .map((item) => item.gameId || getCatalogGames().find((game) => game.title === item.name)?.id)
       .filter(validOwnedGame);
     const nextUser = { ...user, ownedGames: [...new Set([...user.ownedGames, ...purchasedGameIds])] };
+    const savedOrders = readStoredList(ordersStorageKey, validOrder);
+    if (savedOrders.error) {
+      setMessage('Saved orders could not be read, so this checkout was not completed.');
+      return;
+    }
+    const order = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      username: user.username,
+      items: cart.map(({ name, category, price, quantity }) => ({ name, category, price: Number(price), quantity })),
+      total,
+      paymentMethod,
+      createdAt: new Date().toISOString(),
+      status: 'completed',
+    };
 
     if (!updateCart([])) {
       setMessage('Could not complete the demo checkout because your cart could not be updated.');
       return;
     }
     try {
+      window.localStorage.setItem(ordersStorageKey, JSON.stringify([order, ...savedOrders.value]));
       saveAccount(nextUser);
       onUserChange(nextUser);
       setOrderComplete(true);
       setMessage(`Demo order complete with ${paymentMethod}. No payment was processed.`);
     } catch (error) {
-      updateCart(cart);
+      try {
+        window.localStorage.setItem(ordersStorageKey, JSON.stringify(savedOrders.value));
+        updateCart(cart);
+      } catch (rollbackError) {
+        setMessage('Checkout failed and saved data could not be fully restored. Please contact support.');
+        return;
+      }
       setMessage('Could not save your order to this account. Your cart has been restored.');
     }
   }
@@ -855,7 +1005,7 @@ function CartPage({ cart, updateCart, user, onUserChange, onSignIn, wishlistCoun
 
 // Reuses game artwork or a hardware symbol in cart and wishlist rows.
 function ProductArtwork({ product }) {
-  const game = games.find((item) => item.id === product.gameId);
+  const game = getCatalogGames(true).find((item) => item.id === product.gameId);
   if (game) return <GameArtwork game={game} compact />;
   const hardwareItem = hardware.find((item) => item.name === product.name);
   return (
@@ -1029,7 +1179,7 @@ function Storefront({
             ))}
           </div>
           <div className="game-grid">
-            {games.filter((game) => activeCategory === 'All' || game.category === activeCategory).map((game) => (
+            {getCatalogGames().filter((game) => activeCategory === 'All' || game.category === activeCategory).map((game) => (
               <article className="game-card" key={game.id}>
                 <GameArtwork game={game} />
                 <div className="game-card__body">
@@ -1160,7 +1310,7 @@ function Storefront({
       </main>
       <footer className="site-footer" id="support">
         <a className="brand" href="#home">TAD<span>POLE</span></a>
-        <p>Need a hand? <a href="mailto:support@tadpole.example">Contact Player Support</a></p>
+        <p>Need a hand? <a href="?support">Contact Player Support</a> · <a href="?admin">Staff Portal</a></p>
         <span>© 2024 TADPOLE. INSERT COIN TO CONTINUE.</span>
       </footer>
     </>
@@ -1207,8 +1357,12 @@ function CareersPage({ selectedRoleId }) {
       setMessage('Saved applications could not be read, so this application was not submitted.');
       return;
     }
+    const savedTracks = readStoredList(applicationTracksStorageKey, validApplicationTrack);
+    if (savedTracks.error) {
+      setMessage('Application inbox data could not be read, so this application was not submitted.');
+      return;
+    }
 
-    // Store the role and submission time with the applicant's form details.
     const application = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       roleId: selectedRole.id,
@@ -1218,6 +1372,7 @@ function CareersPage({ selectedRoleId }) {
       portfolio,
       coverNote,
       submittedAt: new Date().toISOString(),
+      status: 'pending',
     };
 
     try {
@@ -1225,7 +1380,16 @@ function CareersPage({ selectedRoleId }) {
         jobApplicationsStorageKey,
         JSON.stringify([application, ...savedApplications.value]),
       );
-      setMessage(`Application for ${selectedRole.title} saved in this browser. It has not been sent to an employer.`);
+      try {
+        window.localStorage.setItem(
+          applicationTracksStorageKey,
+          JSON.stringify([{ applicationId: application.id }, ...savedTracks.value]),
+        );
+      } catch (error) {
+        window.localStorage.setItem(jobApplicationsStorageKey, JSON.stringify(savedApplications.value));
+        throw error;
+      }
+      setMessage(`Your application for ${selectedRole.title} was submitted successfully! We’ll be in touch if you’re selected.`);
       event.currentTarget.reset();
     } catch (error) {
       setMessage('Could not save your application in this browser. Please try again.');
@@ -1284,9 +1448,116 @@ function CareersPage({ selectedRoleId }) {
       </div>
       <footer className="site-footer">
         <a className="brand" href="/">TAD<span>POLE</span></a>
-        <p>Need a hand? <a href="mailto:support@tadpole.example">Contact Player Support</a></p>
+        <p>Need a hand? <a href="?support">Contact Player Support</a> · <a href="?admin">Staff Portal</a></p>
         <span>© 2024 TADPOLE. INSERT COIN TO CONTINUE.</span>
       </footer>
+    </main>
+  );
+}
+
+function NotificationsPage({ user, cartCount, wishlistCount }) {
+  const notifications = getUserNotifications(user);
+  return (
+    <main className="shopping-page notifications-page">
+      <ShopPageHeader cartCount={cartCount} wishlistCount={wishlistCount} user={user} />
+      <div className="shopping-page-content">
+        <div className="section-heading">
+          <div><p className="eyebrow">YOUR PLAYER INBOX</p><h1>Notifications</h1></div>
+          <p>Order updates and messages from the Tadpole team.</p>
+        </div>
+        <section className="notification-list" aria-label="Your notifications">
+          {notifications.length ? notifications.map((notification) => (
+            <details className={`notification-card${notification.application?.status === 'accepted' ? ' notification-card--hired' : ''}`} key={notification.id}>
+              <summary>
+                <span className="notification-card__icon" aria-hidden="true">{notification.kind === 'order' ? '▧' : '✦'}</span>
+                <span className="notification-card__heading"><strong>{notification.title}</strong><time>{new Date(notification.date).toLocaleString()}</time></span>
+                <span className="notification-card__open">VIEW</span>
+              </summary>
+              <div className="notification-card__body">
+                {notification.application?.status === 'accepted' && <p className="notification-ceo-note">A NOTE FROM THE CEO</p>}
+                <p>{notification.message}</p>
+                {notification.application?.status === 'accepted' && notification.invitation && !notification.invitation.usedAt && (
+                  <div className="staff-invitation">
+                    <p className="eyebrow">YOUR ONE-TIME STAFF INVITATION KEY</p>
+                    <code>{notification.invitation.code}</code>
+                    <p>Use this key to create your worker username and password. Keep it private; it can only be used once.</p>
+                    <a className="button button--solid" href="?admin&join">Create Your Staff Account</a>
+                  </div>
+                )}
+                {notification.application?.status === 'accepted' && notification.invitation?.usedAt && (
+                  <p className="notification-used">Your staff account has been created. <a href="?admin">Go to Staff Sign In →</a></p>
+                )}
+              </div>
+            </details>
+          )) : (
+            <div className="notification-empty"><span aria-hidden="true">♧</span><h2>Your inbox is empty</h2><p>You’re all caught up. New order updates and messages will appear here.</p></div>
+          )}
+        </section>
+        <p className="notification-demo-note">Notifications are stored only in this browser. They are not emailed or synced to other devices.</p>
+      </div>
+    </main>
+  );
+}
+
+function SupportPage({ user }) {
+  const [message, setMessage] = useState('');
+  function submitReport(event) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const name = String(formData.get('name') || '').trim();
+    const email = String(formData.get('email') || '').trim();
+    const category = String(formData.get('category') || '');
+    const details = String(formData.get('details') || '').trim();
+    if (!name || !email || !category || !details) {
+      setMessage('Complete every field before sending your report.');
+      return;
+    }
+    const reports = readStoredList(reportsStorageKey, validPlayerReport);
+    if (reports.error) {
+      setMessage('Saved reports could not be read, so this report was not submitted.');
+      return;
+    }
+    const report = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      email,
+      category,
+      details,
+      submittedAt: new Date().toISOString(),
+      status: 'open',
+      username: user?.username || '',
+    };
+    try {
+      window.localStorage.setItem(reportsStorageKey, JSON.stringify([report, ...reports.value]));
+      setMessage('Your report has been saved for the Tadpole team in this browser.');
+      event.currentTarget.reset();
+    } catch (error) {
+      setMessage('Could not save your report in this browser.');
+    }
+  }
+  return (
+    <main className="shopping-page">
+      <header className="careers-header"><a className="brand" href="/">TAD<span>POLE</span></a><a className="button button--outline" href="/">← Back to Store</a></header>
+      <div className="shopping-page-content support-page">
+        <p className="eyebrow">PLAYER SUPPORT</p>
+        <h1>How can we help?</h1>
+        <p>Send a report to the Tadpole team. This demo stores reports in the current browser for staff review.</p>
+        <form className="support-form" onSubmit={submitReport}>
+          <label htmlFor="supportName">YOUR NAME</label>
+          <input id="supportName" name="name" defaultValue={user?.profile.name || ''} required />
+          <label htmlFor="supportEmail">EMAIL ADDRESS</label>
+          <input id="supportEmail" name="email" type="email" required />
+          <label htmlFor="supportCategory">WHAT IS THIS ABOUT?</label>
+          <select id="supportCategory" name="category" required defaultValue="">
+            <option value="" disabled>Select a category</option>
+            <option>Account access</option><option>Order or transaction</option><option>Game or hardware</option><option>Player report</option><option>Other</option>
+          </select>
+          <label htmlFor="supportDetails">DETAILS</label>
+          <textarea id="supportDetails" name="details" rows="5" maxLength="2000" required />
+          <button className="button button--solid" type="submit">Send Report</button>
+          <p className="checkout-message" role="status">{message}</p>
+        </form>
+      </div>
     </main>
   );
 }
@@ -1298,6 +1569,16 @@ function ProfilePage({ user, onUserChange, onSignOut }) {
   const [profileMessage, setProfileMessage] = useState('');
   const ownedGames = user.ownedGames;
   const earnedBadges = user.badges;
+  const savedOrders = readStoredList(ordersStorageKey, validOrder);
+  const ownedHardware = new Map();
+  if (!savedOrders.error) {
+    savedOrders.value
+      .filter((order) => getAccountKey(order.username) === getAccountKey(user.username))
+      .forEach((order) => order.items.forEach((item) => {
+        const product = hardware.find((entry) => entry.name === item.name && entry.category === item.category);
+        if (product) ownedHardware.set(product.id, (ownedHardware.get(product.id) || 0) + Number(item.quantity));
+      }));
+  }
 
   // Validates editable fields and saves the updated profile to the account.
   function saveProfile(event) {
@@ -1403,7 +1684,7 @@ function ProfilePage({ user, onUserChange, onSignOut }) {
               </div>
               {earnedBadges.length ? (
                 <div className="badge-grid">
-                  {demoBadges.filter((badge) => earnedBadges.includes(badge.id)).map((badge) => (
+                  {getCatalogGames(true).map(getDemoBadge).filter((badge) => earnedBadges.includes(badge.id)).map((badge) => (
                     <article className="badge-card" key={badge.id}>
                       <span className="badge-card__icon" aria-hidden="true">{badge.icon}</span>
                       <div><h4>{badge.title}</h4><p>{badge.gameTitle}</p></div>
@@ -1425,7 +1706,7 @@ function ProfilePage({ user, onUserChange, onSignOut }) {
           </div>
           {ownedGames.length ? (
             <div className="game-grid">
-              {games.filter((game) => ownedGames.includes(game.id)).map((game) => (
+              {getCatalogGames(true).filter((game) => ownedGames.includes(game.id)).map((game) => (
                 <article className="game-card owned-game-card" key={game.id}>
                   <GameArtwork game={game} />
                   <div className="game-card__body">
@@ -1442,6 +1723,34 @@ function ProfilePage({ user, onUserChange, onSignOut }) {
               <h3>Your collection starts here.</h3>
               <p>Games you purchase at checkout will show up in this library.</p>
               <a className="button button--outline" href="/">Browse Games</a>
+            </div>
+          )}
+        </section>
+        <section className="my-hardware my-games section-shell">
+          <div className="section-heading">
+            <div><p className="eyebrow">YOUR COLLECTION</p><h2>My Hardware</h2></div>
+            <p>{ownedHardware.size} {ownedHardware.size === 1 ? 'product' : 'products'} owned</p>
+          </div>
+          {savedOrders.error ? (
+            <p className="owned-empty" role="alert">Your hardware purchases could not be loaded from this browser.</p>
+          ) : ownedHardware.size ? (
+            <div className="hardware-grid owned-hardware-grid">
+              {hardware.filter((product) => ownedHardware.has(product.id)).map((product) => (
+                <article className="hardware-card owned-hardware-card" key={product.id}>
+                  <HardwareArtwork product={product} />
+                  <div className="hardware-card__body">
+                    <div className="hardware-card__title"><h3>{product.name}</h3><strong>{ownedHardware.get(product.id)} owned</strong></div>
+                    <p>{product.tagline}</p>
+                    <a className="button button--outline" href={`?hardware=${product.id}`}>View Product Details</a>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="owned-empty">
+              <h3>Your hardware collection starts here.</h3>
+              <p>Hardware you purchase at checkout will show up here.</p>
+              <a className="button button--outline" href="/#hardware">Browse Hardware</a>
             </div>
           )}
         </section>
@@ -1637,7 +1946,7 @@ function ProductReviewPage({ product, user, cart, wishlist, updateCart, updateWi
 // Game details, playable export, sample badge action, and player comments.
 function DemoPage({ game, user, onUserChange, onSignIn }) {
   const storageKey = `pixelplay-comments-${game.id}`;
-  const badge = demoBadges.find((item) => item.gameId === game.id);
+  const badge = getDemoBadge(game);
   const hasPlayableBuild = game.id === 'neon-drift';
   const initialComments = readStoredList(
     storageKey,
@@ -1777,6 +2086,445 @@ function DemoPage({ game, user, onUserChange, onSignIn }) {
 }
 
 // App-level state and URL routing for every page in the storefront.
+function readStaffAccounts() {
+  const stored = window.localStorage.getItem(staffAccountsStorageKey);
+  if (!stored) return {};
+  const accounts = JSON.parse(stored);
+  if (!accounts || typeof accounts !== 'object' || Array.isArray(accounts)) {
+    throw new Error('Saved staff accounts are invalid.');
+  }
+  return accounts;
+}
+
+function readModerationItems(prefix, validator) {
+  const items = [];
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const storageKey = window.localStorage.key(index);
+    if (!storageKey?.startsWith(prefix)) continue;
+    const result = readStoredList(storageKey, validator);
+    if (!result.error) {
+      result.value.forEach((item, itemIndex) => items.push({ ...item, storageKey, itemIndex }));
+    }
+  }
+  return items;
+}
+
+function AdminPage() {
+  const isJoinFlow = new URLSearchParams(window.location.search).has('join');
+  const [accountsState, setAccountsState] = useState(() => {
+    try {
+      return { accounts: readStaffAccounts(), error: '' };
+    } catch (error) {
+      return { accounts: {}, error: error.message || 'Could not load staff accounts.' };
+    }
+  });
+  const [activeKey, setActiveKey] = useState(() => window.localStorage.getItem(activeStaffStorageKey) || '');
+  const [section, setSection] = useState('overview');
+  const [message, setMessage] = useState('');
+  const [verifiedCode, setVerifiedCode] = useState('');
+  const [workerUsername, setWorkerUsername] = useState('');
+  const [joinMessage, setJoinMessage] = useState('');
+  const [redeemedInvitation, setRedeemedInvitation] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const staff = accountsState.accounts[activeKey];
+  const staffSections = [
+    ['overview', 'Overview'],
+    ['games', 'Games & Uploads'],
+    ['comments', 'Comments & Reviews'],
+    ['reports', 'Player Reports'],
+    ['orders', 'Orders & Transactions'],
+    ['customers', 'Customers'],
+    ['applications', 'Job Applications'],
+  ];
+
+  function reload() {
+    try {
+      setAccountsState({ accounts: readStaffAccounts(), error: '' });
+      setActiveKey(window.localStorage.getItem(activeStaffStorageKey) || '');
+      setRefresh((value) => value + 1);
+    } catch (error) {
+      setAccountsState({ accounts: {}, error: error.message || 'Could not reload staff accounts.' });
+    }
+  }
+
+  useEffect(() => {
+    function sync(event) {
+      if (!event.key || [staffAccountsStorageKey, activeStaffStorageKey].includes(event.key)) reload();
+      else setRefresh((value) => value + 1);
+    }
+    window.addEventListener('storage', sync);
+    return () => window.removeEventListener('storage', sync);
+  }, []);
+
+  async function createStaff(event, role) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const username = String(data.get('username') || '').trim();
+    const password = String(data.get('password') || '');
+    const name = String(data.get('name') || username).trim();
+    const confirm = String(data.get('confirmPassword') || '');
+    setMessage('');
+    try {
+      const currentAccounts = readStaffAccounts();
+      if (!/^[a-zA-Z0-9_]{3,24}$/.test(username)) throw new Error('Username must be 3–24 characters: letters, numbers, or underscores.');
+      if (password.length < 8) throw new Error('Password must be at least 8 characters.');
+      if (role === 'admin' && password !== confirm) throw new Error('Passwords do not match.');
+      const key = getAccountKey(username);
+      if (currentAccounts[key]) throw new Error('That staff username is already in use.');
+      const salt = window.crypto.getRandomValues(new Uint8Array(16));
+      const account = {
+        username,
+        name,
+        role,
+        passwordSalt: bytesToHex(salt),
+        passwordHash: await hashPassword(password, salt),
+        createdAt: new Date().toISOString(),
+      };
+      const nextAccounts = { ...currentAccounts, [key]: account };
+      window.localStorage.setItem(staffAccountsStorageKey, JSON.stringify(nextAccounts));
+      window.localStorage.setItem(activeStaffStorageKey, key);
+      setAccountsState({ accounts: nextAccounts, error: '' });
+      setActiveKey(key);
+      form.reset();
+    } catch (error) {
+      setMessage(error.message || 'Could not create the staff account.');
+    }
+  }
+
+  async function signIn(event) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const username = String(data.get('username') || '').trim();
+    const password = String(data.get('password') || '');
+    try {
+      const key = getAccountKey(username);
+      const account = readStaffAccounts()[key];
+      if (!account || !account.passwordSalt || !account.passwordHash) throw new Error('Username or password is incorrect.');
+      const salt = Uint8Array.from(account.passwordSalt.match(/.{1,2}/g) || [], (byte) => Number.parseInt(byte, 16));
+      const hash = await hashPassword(password, salt);
+      if (!equalHashes(hash, account.passwordHash)) throw new Error('Username or password is incorrect.');
+      window.localStorage.setItem(activeStaffStorageKey, key);
+      setActiveKey(key);
+      setMessage('');
+    } catch (error) {
+      setMessage(error.message || 'Could not sign in to the staff portal.');
+    }
+  }
+
+  function verifyInvitation(event) {
+    event.preventDefault();
+    const code = String(new FormData(event.currentTarget).get('code') || '').trim().toUpperCase();
+    const invitations = readStoredList(staffInvitationsStorageKey, validStaffInvitation);
+    const applications = readStoredList(jobApplicationsStorageKey, validJobApplication);
+    const invitation = invitations.value.find((item) => item.code === code && !item.usedAt);
+    const application = invitation && applications.value.find((item) => item.id === invitation.applicationId && item.status === 'accepted');
+    if (!code || invitations.error || applications.error || !application) {
+      setJoinMessage('That invitation code is invalid or has already been used.');
+      return;
+    }
+    setVerifiedCode(code);
+    setWorkerUsername('');
+    setJoinMessage('');
+  }
+
+  async function redeemInvitation(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const username = String(data.get('staffUsername') || '').trim();
+    const password = String(data.get('password') || '');
+    const confirm = String(data.get('confirmPassword') || '');
+    try {
+      if (!/^[a-zA-Z0-9_]{3,24}$/.test(username)) throw new Error('Worker username must be 3–24 characters: letters, numbers, or underscores.');
+      if (password.length < 8 || password !== confirm) throw new Error(password.length < 8 ? 'Password must be at least 8 characters.' : 'Passwords do not match.');
+      const invitations = readStoredList(staffInvitationsStorageKey, validStaffInvitation);
+      const applications = readStoredList(jobApplicationsStorageKey, validJobApplication);
+      const invitation = invitations.value.find((item) => item.code === verifiedCode && !item.usedAt);
+      const application = invitation && applications.value.find((item) => item.id === invitation.applicationId && item.status === 'accepted');
+      if (invitations.error || applications.error || !invitation || !application) throw new Error('This invitation is invalid or has already been used.');
+      const key = getAccountKey(username);
+      const currentAccounts = readStaffAccounts();
+      if (currentAccounts[key]) throw new Error('That worker username is already in use.');
+      const salt = window.crypto.getRandomValues(new Uint8Array(16));
+      const account = {
+        username,
+        name: application.name,
+        role: 'worker',
+        applicationId: application.id,
+        passwordSalt: bytesToHex(salt),
+        passwordHash: await hashPassword(password, salt),
+        createdAt: new Date().toISOString(),
+      };
+      const nextAccounts = { ...currentAccounts, [key]: account };
+      const nextInvitations = invitations.value.map((item) => item.id === invitation.id ? { ...item, usedAt: new Date().toISOString(), usedBy: username } : item);
+      const nextApplications = applications.value.map((item) => item.id === application.id ? { ...item, staffUsername: username } : item);
+      window.localStorage.setItem(staffAccountsStorageKey, JSON.stringify(nextAccounts));
+      try {
+        window.localStorage.setItem(staffInvitationsStorageKey, JSON.stringify(nextInvitations));
+        window.localStorage.setItem(jobApplicationsStorageKey, JSON.stringify(nextApplications));
+        window.localStorage.setItem(activeStaffStorageKey, key);
+      } catch (error) {
+        window.localStorage.setItem(staffAccountsStorageKey, JSON.stringify(currentAccounts));
+        window.localStorage.setItem(staffInvitationsStorageKey, JSON.stringify(invitations.value));
+        window.localStorage.setItem(jobApplicationsStorageKey, JSON.stringify(applications.value));
+        throw error;
+      }
+      setAccountsState({ accounts: nextAccounts, error: '' });
+      setActiveKey(key);
+      setRedeemedInvitation(true);
+      window.history.replaceState({}, '', '?admin');
+    } catch (error) {
+      setJoinMessage(error.message || 'Could not create the worker account.');
+    }
+  }
+
+  if (isJoinFlow && !redeemedInvitation) {
+    return (
+      <main className="admin-login-page">
+        <header className="careers-header"><a className="brand" href="/">TAD<span>POLE</span></a><span className="admin-brand__label">ADMIN PANEL</span></header>
+        <section className="admin-login-panel">
+          <p className="eyebrow">EMPLOYEE ONBOARDING</p>
+          {!verifiedCode ? (
+            <>
+              <h1>Enter your invitation key</h1>
+              <p>Paste the one-time staff code from your Tadpole notification to continue.</p>
+              <form key="staff-invitation-verification" className="admin-form" autoComplete="off" onSubmit={verifyInvitation}>
+                <label htmlFor="staffInviteCode">STAFF INVITATION KEY</label>
+                <input id="staffInviteCode" name="code" autoComplete="off" required />
+                <button className="button button--solid" type="submit">Verify Code</button>
+                <p className="admin-message" role="alert">{joinMessage}</p>
+              </form>
+            </>
+          ) : (
+            <>
+              <h1>Create your worker account</h1>
+              <p>Your invitation is verified. Choose the username and password you’ll use for the staff portal.</p>
+              <form key="staff-account-creation" className="admin-form" autoComplete="off" onSubmit={redeemInvitation}>
+                <label htmlFor="workerUsername">WORKER USERNAME</label>
+                <input id="workerUsername" name="staffUsername" autoComplete="off" value={workerUsername} onChange={(event) => setWorkerUsername(event.target.value)} minLength="3" maxLength="24" pattern="[A-Za-z0-9_]{3,24}" required />
+                <label htmlFor="workerPassword">PASSWORD</label>
+                <input id="workerPassword" name="password" type="password" autoComplete="new-password" minLength="8" required />
+                <label htmlFor="workerConfirm">CONFIRM PASSWORD</label>
+                <input id="workerConfirm" name="confirmPassword" type="password" autoComplete="new-password" minLength="8" required />
+                <button className="button button--solid" type="submit">Create Staff Account</button>
+                <p className="admin-message" role="alert">{joinMessage}</p>
+              </form>
+            </>
+          )}
+          <div className="admin-demo-warning"><strong>Prototype notice</strong><span>Staff access is saved only in this browser and is not server-protected or synced.</span></div>
+        </section>
+      </main>
+    );
+  }
+
+  if (accountsState.error) return <main className="admin-login-page"><section className="admin-login-panel"><h1>Staff data unavailable</h1><p role="alert">{accountsState.error}</p></section></main>;
+  if (!staff) {
+    const firstSetup = Object.keys(accountsState.accounts).length === 0;
+    return (
+      <main className="admin-login-page">
+        <header className="careers-header"><a className="brand" href="/">TAD<span>POLE</span></a><span className="admin-brand__label">ADMIN PANEL</span></header>
+        <section className="admin-login-panel">
+          <p className="eyebrow">{firstSetup ? 'FIRST-TIME SETUP' : 'AUTHORIZED PERSONNEL'}</p>
+          <h1>{firstSetup ? 'Create the first admin' : 'Staff sign in'}</h1>
+          <p>{firstSetup ? 'Set up the initial administrator account for this browser.' : 'Sign in with your staff username and password.'}</p>
+          <form className="admin-form" onSubmit={firstSetup ? (event) => createStaff(event, 'admin') : signIn}>
+            {firstSetup && <><label htmlFor="staffName">ADMIN NAME</label><input id="staffName" name="name" required /></>}
+            <label htmlFor="staffUsername">{firstSetup ? 'ADMIN USERNAME' : 'WORKER USERNAME'}</label><input id="staffUsername" name="username" autoComplete="username" required />
+            <label htmlFor="staffPassword">PASSWORD</label><input id="staffPassword" name="password" type="password" autoComplete={firstSetup ? 'new-password' : 'current-password'} required />
+            {firstSetup && <><label htmlFor="staffConfirm">CONFIRM PASSWORD</label><input id="staffConfirm" name="confirmPassword" type="password" required /></>}
+            <button className="button button--solid" type="submit">{firstSetup ? 'Create Admin Account' : 'Sign In'}</button>
+            <p className="admin-message" role="alert">{message}</p>
+          </form>
+          <div className="admin-demo-warning"><strong>Prototype notice</strong><span>Staff accounts and dashboard data are saved only in this browser. This demo is not secure for real employee access.</span></div>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <AdminDashboard
+      staff={staff}
+      sections={staffSections}
+      section={section}
+      setSection={setSection}
+      message={message}
+      setMessage={setMessage}
+      refresh={refresh}
+      onReload={() => setRefresh((value) => value + 1)}
+      onSignOut={() => { window.localStorage.removeItem(activeStaffStorageKey); setActiveKey(''); setSection('overview'); }}
+    />
+  );
+}
+
+function AdminDashboard({ staff, sections, section, setSection, message, setMessage, refresh, onReload, onSignOut }) {
+  const applications = readStoredList(jobApplicationsStorageKey, validJobApplication);
+  const orders = readStoredList(ordersStorageKey, validOrder);
+  const reports = readStoredList(reportsStorageKey, validPlayerReport);
+  const uploaded = readStoredList(catalogStorageKey, validCatalogGame);
+  const comments = readModerationItems('pixelplay-comments-', (item) => item && typeof item.name === 'string' && typeof item.text === 'string' && typeof item.date === 'string');
+  const reviews = readModerationItems(`${hardwareReviewsStorageKey}-`, validHardwareReview);
+  let customers = [];
+  let customerError = '';
+  try {
+    customers = Object.entries(readAccounts()).map(([key, account]) => ({ key, ...account, profile: readAccountProfile(account.profile) }));
+  } catch (error) {
+    customerError = error.message || 'Could not load player accounts.';
+  }
+  const pending = applications.value.filter((item) => !item.status || item.status === 'pending');
+  const counts = {
+    overview: orders.value.length + reports.value.filter((item) => item.status !== 'resolved').length + pending.length,
+    games: uploaded.value.filter((item) => item.status === 'published').length,
+    comments: comments.length + reviews.length,
+    reports: reports.value.filter((item) => item.status !== 'resolved').length,
+    orders: orders.value.length,
+    customers: customers.length,
+    applications: pending.length,
+  };
+  const activity = [
+    ...orders.value.map((item) => ({ id: item.id, date: item.createdAt, text: `Order by ${item.username}`, detail: `$${Number(item.total).toFixed(2)} demo transaction` })),
+    ...reports.value.map((item) => ({ id: item.id, date: item.submittedAt, text: `Player report: ${item.category}`, detail: item.name })),
+    ...uploaded.value.map((item) => ({ id: item.id, date: item.uploadedAt, text: `Game uploaded: ${item.title}`, detail: item.uploadedBy || 'Staff' })),
+    ...applications.value.map((item) => ({ id: item.id, date: item.submittedAt, text: `Job application: ${item.roleTitle || item.roleId}`, detail: item.name })),
+    ...comments.map((item) => ({ id: `${item.storageKey}-${item.itemIndex}`, date: item.date, text: `Comment on ${item.storageKey.replace('pixelplay-comments-', '')}`, detail: item.name })),
+  ].sort((a, b) => (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0)).slice(0, 8);
+
+  function persistList(key, list, successMessage) {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(list));
+      setMessage(successMessage);
+      onReload();
+    } catch (error) {
+      setMessage(`Could not save changes in this browser: ${error.message || 'storage unavailable'}`);
+    }
+  }
+  function reviewApplication(application, status) {
+    const nextApplications = applications.value.map((item) => item.id === application.id ? { ...item, status, reviewedAt: new Date().toISOString() } : item);
+    if (status !== 'accepted') {
+      persistList(jobApplicationsStorageKey, nextApplications, 'Application marked as declined.');
+      return;
+    }
+    const invitations = readStoredList(staffInvitationsStorageKey, validStaffInvitation);
+    if (invitations.error) {
+      setMessage('Saved staff invitations could not be read.');
+      return;
+    }
+    const invitation = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, applicationId: application.id, code: createAccessCode('STAFF'), createdAt: new Date().toISOString() };
+    try {
+      window.localStorage.setItem(staffInvitationsStorageKey, JSON.stringify([invitation, ...invitations.value]));
+      try {
+        window.localStorage.setItem(jobApplicationsStorageKey, JSON.stringify(nextApplications));
+      } catch (error) {
+        window.localStorage.setItem(staffInvitationsStorageKey, JSON.stringify(invitations.value));
+        throw error;
+      }
+      setMessage(`${application.name} has been accepted. Their notification includes a one-time staff invitation.`);
+      onReload();
+    } catch (error) {
+      setMessage(error.message || 'Could not send the hiring notification.');
+    }
+  }
+  function updateGame(game, status) {
+    persistList(catalogStorageKey, uploaded.value.map((item) => item.id === game.id ? { ...item, status } : item), 'Game listing updated.');
+  }
+  function updateReport(report, status) {
+    persistList(reportsStorageKey, reports.value.map((item) => item.id === report.id ? { ...item, status } : item), 'Report status updated.');
+  }
+  function removeModeration(item) {
+    const saved = readStoredList(item.storageKey, item.text ? (entry) => entry && typeof entry.text === 'string' : validHardwareReview);
+    if (saved.error) {
+      setMessage('Saved moderation data could not be read.');
+      return;
+    }
+    persistList(item.storageKey, saved.value.filter((_, index) => index !== item.itemIndex), 'Item removed.');
+  }
+  function uploadGame(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const title = String(data.get('title') || '').trim();
+    const category = String(data.get('category') || '').trim();
+    const description = String(data.get('description') || '').trim();
+    const price = Number(data.get('price'));
+    const year = Number(data.get('year'));
+    if (!title || !category || !description || !Number.isFinite(price) || price < 0 || !Number.isInteger(year)) {
+      setMessage('Enter a title, category, valid price, year, and description.');
+      return;
+    }
+    if (getCatalogGames(true).some((game) => game.title.toLowerCase() === title.toLowerCase())) {
+      setMessage('A game with that title is already in the catalog.');
+      return;
+    }
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'game';
+    const game = { id: `uploaded-${slug}-${Date.now().toString(36)}`, title, category, description, price, year, artwork: 'raider', symbol: title.slice(0, 2).toUpperCase(), status: 'published', uploadedBy: staff.username, uploadedAt: new Date().toISOString() };
+    persistList(catalogStorageKey, [game, ...uploaded.value], `${title} is published in the storefront.`);
+    form.reset();
+  }
+
+  return (
+    <main className="admin-dashboard">
+      <header className="admin-header">
+        <a className="brand" href="/">TAD<span>POLE</span></a><span className="admin-brand__label">ADMIN PANEL</span>
+        <div><span>{staff.name} / {staff.role}</span><button className="button button--outline" type="button" onClick={onSignOut}>Sign Out</button><a className="button button--outline" href="/">Store</a></div>
+      </header>
+      <div className="admin-layout">
+        <aside className="admin-sidebar">
+          <p className="eyebrow">CONTROL ROOM</p>
+          <nav aria-label="Admin sections">
+            {sections.map(([key, title]) => (
+              <button type="button" className={section === key ? 'is-active' : ''} key={key} onClick={() => { setSection(key); setMessage(''); }}>
+                <span>{title}</span><b className="admin-nav-count">{counts[key]}</b>
+              </button>
+            ))}
+          </nav>
+          <p className="admin-sidebar__notice">Changes are saved to this browser only.</p>
+        </aside>
+        <section className="admin-workspace" key={`${section}-${refresh}`}>
+          <div className="admin-workspace__heading"><div><p className="eyebrow">STAFF CONSOLE</p><h1>{sections.find(([key]) => key === section)?.[1]}</h1></div><span>LIVE BROWSER DATA</span></div>
+          {message && <p className="admin-message" role="status">{message}</p>}
+          {section === 'overview' && (
+            <>
+              <div className="admin-stat-grid">{sections.slice(1).map(([key, title]) => <button type="button" key={key} onClick={() => setSection(key)}><strong>{counts[key]}</strong><span>{title}</span></button>)}</div>
+              <article className="admin-card"><div className="admin-card__heading"><h2>Recent activity</h2><span>MAIN SITE UPDATES</span></div>{activity.length ? <ul className="admin-activity">{activity.map((item) => <li key={item.id}><strong>{item.text}</strong><span>{item.detail}</span><time>{item.date ? new Date(item.date).toLocaleString() : ''}</time></li>)}</ul> : <p className="admin-empty">New storefront activity will appear here.</p>}</article>
+            </>
+          )}
+          {section === 'games' && (
+            <>
+              <form className="admin-card admin-form" onSubmit={uploadGame}>
+                <div className="admin-card__heading"><h2>Upload a game</h2></div>
+                <label htmlFor="uploadTitle">GAME TITLE</label><input id="uploadTitle" name="title" required />
+                <label htmlFor="uploadCategory">CATEGORY</label><select id="uploadCategory" name="category" required defaultValue="Platformer">{categories.filter((item) => item !== 'All').map((item) => <option key={item}>{item}</option>)}</select>
+                <label htmlFor="uploadPrice">PRICE (USD)</label><input id="uploadPrice" name="price" type="number" min="0" step="0.01" required />
+                <label htmlFor="uploadYear">RELEASE YEAR</label><input id="uploadYear" name="year" type="number" min="1970" max="2100" required />
+                <label htmlFor="uploadDescription">DESCRIPTION</label><textarea id="uploadDescription" name="description" rows="3" required />
+                <button className="button button--solid" type="submit">Publish Game</button>
+              </form>
+              <article className="admin-card"><div className="admin-card__heading"><h2>Games & uploads</h2><span>{getCatalogGames(true).length} LISTINGS</span></div>
+                <div className="admin-list">{getCatalogGames(true).map((game) => <div key={game.id}><strong>{game.title}</strong><span>{game.category} · ${Number(game.price).toFixed(2)} · {game.status || 'published'}</span>{game.id.startsWith('uploaded-') && <button className="button button--outline" type="button" onClick={() => updateGame(game, game.status === 'hidden' ? 'published' : 'hidden')}>{game.status === 'hidden' ? 'Publish' : 'Hide'}</button>}</div>)}</div>
+              </article>
+            </>
+          )}
+          {section === 'comments' && <article className="admin-card"><div className="admin-card__heading"><h2>Comments & reviews</h2><span>{comments.length + reviews.length} ITEMS</span></div>
+            {!comments.length && !reviews.length ? <p className="admin-empty">Player comments and hardware reviews will appear here.</p> : <div className="admin-list">{[...comments.map((item) => ({ ...item, kind: 'COMMENT', body: item.text })), ...reviews.map((item) => ({ ...item, kind: 'HARDWARE REVIEW', body: `${'★'.repeat(item.rating)} ${item.comment}` }))].map((item) => <div key={`${item.storageKey}-${item.itemIndex}`}><strong>{item.kind} · {item.name}</strong><span>{item.body}</span><button className="admin-danger-button" type="button" onClick={() => removeModeration(item)}>Remove</button></div>)}</div>}
+          </article>}
+          {section === 'reports' && <article className="admin-card"><div className="admin-card__heading"><h2>Player reports</h2><span>{reports.value.length} REPORTS</span></div>
+            {reports.error ? <p role="alert">{reports.error}</p> : reports.value.length ? <div className="admin-list">{reports.value.map((report) => <div key={report.id}><strong>{report.category} · {report.name}</strong><span>{report.email} — {report.details}</span><span>Status: {report.status.replace('_', ' ')}</span><div className="admin-actions"><button className="button button--outline" type="button" onClick={() => updateReport(report, 'in_review')}>In Review</button><button className="button button--outline" type="button" onClick={() => updateReport(report, 'resolved')}>Resolve</button></div></div>)}</div> : <p className="admin-empty">No player reports have been submitted.</p>}
+          </article>}
+          {section === 'orders' && <article className="admin-card"><div className="admin-card__heading"><h2>Orders & transactions</h2><span>{orders.value.length} ORDERS</span></div>
+            {orders.value.length ? <div className="admin-list">{orders.value.map((order) => <div key={order.id}><strong>#{order.id.slice(-8)} · {order.username}</strong><span>{order.items.map((item) => `${item.name} × ${item.quantity}`).join(', ')}</span><span>${Number(order.total).toFixed(2)} · ${order.paymentMethod} · Demo only</span><time>{new Date(order.createdAt).toLocaleString()}</time></div>)}</div> : <p className="admin-empty">Completed demo checkouts will appear here.</p>}
+          </article>}
+          {section === 'customers' && <article className="admin-card"><div className="admin-card__heading"><h2>Customers</h2><span>{customers.length} PLAYERS</span></div>
+            {customerError ? <p role="alert">{customerError}</p> : customers.length ? <div className="admin-list">{customers.map((account) => <div key={account.key}><strong>{account.profile.name || account.username}</strong><span>@{account.username} · {(account.ownedGames || []).length} games · {(account.badges || []).length} badges</span></div>)}</div> : <p className="admin-empty">No player accounts have been created in this browser.</p>}
+          </article>}
+          {section === 'applications' && <article className="admin-card"><div className="admin-card__heading"><h2>Job applications</h2><span>{applications.value.length} APPLICATIONS</span></div>
+            {applications.value.length ? <div className="admin-list">{applications.value.map((application) => <div key={application.id}><strong>{application.name} · {application.roleTitle || application.roleId}</strong><span>{application.email} · {application.coverNote}</span>{application.portfolio && <a href={application.portfolio} target="_blank" rel="noreferrer">Portfolio</a>}<span>Status: {application.status || 'pending'}</span>{(!application.status || application.status === 'pending') && <div className="admin-actions"><button className="button button--solid" type="button" onClick={() => reviewApplication(application, 'accepted')}>Accept & Send Hiring Notification</button><button className="button button--outline" type="button" onClick={() => reviewApplication(application, 'rejected')}>Decline</button></div>}</div>)}</div> : <p className="admin-empty">No job applications have been submitted.</p>}
+          </article>}
+        </section>
+      </div>
+    </main>
+  );
+}
+
 function App() {
   const [authState, setAuthState] = useState(loadActiveUser);
   const [page, setPage] = useState(() => new URLSearchParams(window.location.search));
@@ -1858,6 +2606,15 @@ function App() {
   }
 
   // Choose which page component to render from the current query-string route.
+  if (page.has('admin')) {
+    return <AdminPage />;
+  }
+  if (page.has('support')) {
+    return <SupportPage user={user} />;
+  }
+  if (page.has('notifications')) {
+    return <NotificationsPage user={user} cartCount={cart.reduce((total, item) => total + item.quantity, 0)} wishlistCount={wishlist.length} />;
+  }
   if (page.has('careers')) {
     return <CareersPage selectedRoleId={page.get('role')} />;
   }
